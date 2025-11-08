@@ -53,6 +53,10 @@ export const installSideStoreOperation: Operation = {
       id: "pairing",
       title: "Place Pairing File",
     },
+    {
+      id: "open",
+      title: "Open SideStore",
+    },
   ],
 };
 

@@ -6,6 +6,10 @@ use crate::{
     operation::Operation,
     pairing::{get_sidestore_info, place_pairing},
 };
+use idevice::{
+    core_device::AppServiceClient, core_device_proxy::CoreDeviceProxy, rsd::RsdHandshake,
+    IdeviceService, RsdService,
+};
 use isideload::{sideload::sideload_app, SideloadConfiguration};
 use tauri::{AppHandle, Manager, State, Window};
 
@@ -129,19 +133,54 @@ pub async fn install_sidestore_operation(
         "pairing",
         get_sidestore_info(device.clone(), live_container).await,
     )?;
-    if let Some(info) = sidestore_info {
-        op.fail_if_err(
-            "pairing",
-            place_pairing(device, info.bundle_id, info.path).await,
-        )?;
-    } else {
+    if sidestore_info.is_none() {
         return op.fail(
             "pairing",
             "Could not find SideStore's bundle ID".to_string(),
         );
     }
 
-    op.complete("pairing")?;
+    let info = sidestore_info.unwrap();
+    op.fail_if_err(
+        "pairing",
+        place_pairing(device.clone(), info.bundle_id.clone(), info.path).await,
+    )?;
+
+    op.move_on("pairing", "open")?;
+
+    let provider = op.fail_if_err("open", get_provider(&device).await)?;
+    let proxy = op.fail_if_err_map("open", CoreDeviceProxy::connect(&provider).await, |e| {
+        e.to_string()
+    })?;
+    let rsd_port = proxy.handshake.server_rsd_port;
+
+    let adapter = op.fail_if_err_map("open", proxy.create_software_tunnel(), |e| {
+        format!("Failed to create software tunnel: {}", e)
+    })?;
+
+    let mut adapter = adapter.to_async_handle();
+
+    let stream = op.fail_if_err_map("open", adapter.connect(rsd_port).await, |e| {
+        format!(
+            "Failed to connect to RSD service on port {}: {}",
+            rsd_port, e
+        )
+    })?;
+
+    let mut handshake = op.fail_if_err_map("open", RsdHandshake::new(stream).await, |e| {
+        format!("Failed to perform RSD handshake: {}", e)
+    })?;
+
+    let mut asc = op.fail_if_err_map(
+        "open",
+        AppServiceClient::connect_rsd(&mut adapter, &mut handshake).await,
+        |e| format!("Failed to connect to AppServiceClient: {}", e),
+    )?;
+
+    asc.launch_application(info.bundle_id, &[], false, false, None, None, None)
+        .await
+        .map_err(|e| format!("Failed to launch SideStore: {}", e))?;
+
     Ok(())
 }
 
